@@ -111,52 +111,70 @@ func (p *Factory) AdminK8sInterface() (kubernetes.Interface, error) {
 	return kubernetes.NewForConfig(p.clientCfg)
 }
 
-func (p *Factory) DynamicClient(ctx *types.APIRequest) (dynamic.Interface, error) {
-	return newDynamicClient(ctx, p.clientCfg, p.impersonate)
+func (p *Factory) DynamicClient(ctx *types.APIRequest, warningHandler rest.WarningHandler) (dynamic.Interface, error) {
+	config := *p.clientCfg
+	config.WarningHandler = warningHandler
+	return newDynamicClient(ctx, &config, p.impersonate)
 }
 
-func (p *Factory) Client(ctx *types.APIRequest, s *types.APISchema, namespace string) (dynamic.ResourceInterface, error) {
-	return newClient(ctx, p.clientCfg, s, namespace, p.impersonate)
+func (p *Factory) Client(ctx *types.APIRequest, s *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error) {
+	config := *p.clientCfg
+	config.WarningHandler = warningHandler
+	return newClient(ctx, &config, s, namespace, p.impersonate)
 }
 
-func (p *Factory) AdminClient(ctx *types.APIRequest, s *types.APISchema, namespace string) (dynamic.ResourceInterface, error) {
-	return newClient(ctx, p.clientCfg, s, namespace, false)
+func (p *Factory) AdminClient(ctx *types.APIRequest, s *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error) {
+	config := *p.clientCfg
+	config.WarningHandler = warningHandler
+	return newClient(ctx, &config, s, namespace, false)
 }
 
-func (p *Factory) ClientForWatch(ctx *types.APIRequest, s *types.APISchema, namespace string) (dynamic.ResourceInterface, error) {
-	return newClient(ctx, p.watchClientCfg, s, namespace, p.impersonate)
+func (p *Factory) ClientForWatch(ctx *types.APIRequest, s *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error) {
+	config := *p.watchClientCfg
+	config.WarningHandler = warningHandler
+	return newClient(ctx, &config, s, namespace, p.impersonate)
 }
 
-func (p *Factory) AdminClientForWatch(ctx *types.APIRequest, s *types.APISchema, namespace string) (dynamic.ResourceInterface, error) {
-	return newClient(ctx, p.watchClientCfg, s, namespace, false)
+func (p *Factory) AdminClientForWatch(ctx *types.APIRequest, s *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error) {
+	config := *p.watchClientCfg
+	config.WarningHandler = warningHandler
+	return newClient(ctx, &config, s, namespace, false)
 }
 
-func (p *Factory) TableClient(ctx *types.APIRequest, s *types.APISchema, namespace string) (dynamic.ResourceInterface, error) {
+func (p *Factory) TableClient(ctx *types.APIRequest, s *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error) {
 	if attributes.Table(s) {
-		return newClient(ctx, p.tableClientCfg, s, namespace, p.impersonate)
+		config := *p.tableClientCfg
+		config.WarningHandler = warningHandler
+		return newClient(ctx, &config, s, namespace, p.impersonate)
 	}
-	return p.Client(ctx, s, namespace)
+	return p.Client(ctx, s, namespace, warningHandler)
 }
 
-func (p *Factory) TableAdminClient(ctx *types.APIRequest, s *types.APISchema, namespace string) (dynamic.ResourceInterface, error) {
+func (p *Factory) TableAdminClient(ctx *types.APIRequest, s *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error) {
 	if attributes.Table(s) {
-		return newClient(ctx, p.tableClientCfg, s, namespace, false)
+		config := *p.tableClientCfg
+		config.WarningHandler = warningHandler
+		return newClient(ctx, &config, s, namespace, false)
 	}
-	return p.AdminClient(ctx, s, namespace)
+	return p.AdminClient(ctx, s, namespace, warningHandler)
 }
 
-func (p *Factory) TableClientForWatch(ctx *types.APIRequest, s *types.APISchema, namespace string) (dynamic.ResourceInterface, error) {
+func (p *Factory) TableClientForWatch(ctx *types.APIRequest, s *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error) {
 	if attributes.Table(s) {
-		return newClient(ctx, p.tableWatchClientCfg, s, namespace, p.impersonate)
+		config := *p.tableWatchClientCfg
+		config.WarningHandler = warningHandler
+		return newClient(ctx, &config, s, namespace, p.impersonate)
 	}
-	return p.ClientForWatch(ctx, s, namespace)
+	return p.ClientForWatch(ctx, s, namespace, warningHandler)
 }
 
-func (p *Factory) TableAdminClientForWatch(ctx *types.APIRequest, s *types.APISchema, namespace string) (dynamic.ResourceInterface, error) {
+func (p *Factory) TableAdminClientForWatch(ctx *types.APIRequest, s *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error) {
 	if attributes.Table(s) {
-		return newClient(ctx, p.tableWatchClientCfg, s, namespace, false)
+		config := *p.tableWatchClientCfg
+		config.WarningHandler = warningHandler
+		return newClient(ctx, &config, s, namespace, false)
 	}
-	return p.AdminClientForWatch(ctx, s, namespace)
+	return p.AdminClientForWatch(ctx, s, namespace, warningHandler)
 }
 
 func setupConfig(ctx *types.APIRequest, cfg *rest.Config, impersonate bool) (*rest.Config, error) {

@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 const watchTimeoutEnv = "CATTLE_WATCH_TIMEOUT_SECONDS"
@@ -51,13 +52,28 @@ type ClientGetter interface {
 	IsImpersonating() bool
 	K8sInterface(ctx *types.APIRequest) (kubernetes.Interface, error)
 	AdminK8sInterface() (kubernetes.Interface, error)
-	Client(ctx *types.APIRequest, schema *types.APISchema, namespace string) (dynamic.ResourceInterface, error)
-	DynamicClient(ctx *types.APIRequest) (dynamic.Interface, error)
-	AdminClient(ctx *types.APIRequest, schema *types.APISchema, namespace string) (dynamic.ResourceInterface, error)
-	TableClient(ctx *types.APIRequest, schema *types.APISchema, namespace string) (dynamic.ResourceInterface, error)
-	TableAdminClient(ctx *types.APIRequest, schema *types.APISchema, namespace string) (dynamic.ResourceInterface, error)
-	TableClientForWatch(ctx *types.APIRequest, schema *types.APISchema, namespace string) (dynamic.ResourceInterface, error)
-	TableAdminClientForWatch(ctx *types.APIRequest, schema *types.APISchema, namespace string) (dynamic.ResourceInterface, error)
+	Client(ctx *types.APIRequest, schema *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error)
+	DynamicClient(ctx *types.APIRequest, warningHandler rest.WarningHandler) (dynamic.Interface, error)
+	AdminClient(ctx *types.APIRequest, schema *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error)
+	TableClient(ctx *types.APIRequest, schema *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error)
+	TableAdminClient(ctx *types.APIRequest, schema *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error)
+	TableClientForWatch(ctx *types.APIRequest, schema *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error)
+	TableAdminClientForWatch(ctx *types.APIRequest, schema *types.APISchema, namespace string, warningHandler rest.WarningHandler) (dynamic.ResourceInterface, error)
+}
+
+type WarningBuffer struct {
+	Warnings []types.Warning
+}
+
+func (w *WarningBuffer) HandleWarningHeader(code int, agent string, text string) {
+	if w.Warnings == nil {
+		w.Warnings = []types.Warning{}
+	}
+	w.Warnings = append(w.Warnings, types.Warning{
+		Code:  code,
+		Agent: agent,
+		Text:  text,
+	})
 }
 
 // RelationshipNotifier is an interface for handling wrangler summary.Relationship events.
@@ -90,15 +106,15 @@ func NewProxyStore(clientGetter ClientGetter, notifier RelationshipNotifier, loo
 
 // ByID looks up a single object by its ID.
 func (s *Store) ByID(apiOp *types.APIRequest, schema *types.APISchema, id string) (types.APIObject, error) {
-	result, err := s.byID(apiOp, schema, apiOp.Namespace, id)
-	return toAPI(schema, result), err
+	result, warnings, err := s.byID(apiOp, schema, apiOp.Namespace, id)
+	return toAPI(schema, result, warnings), err
 }
 
 func decodeParams(apiOp *types.APIRequest, target runtime.Object) error {
 	return paramCodec.DecodeParameters(apiOp.Request.URL.Query(), metav1.SchemeGroupVersion, target)
 }
 
-func toAPI(schema *types.APISchema, obj runtime.Object) types.APIObject {
+func toAPI(schema *types.APISchema, obj runtime.Object, warnings []types.Warning) types.APIObject {
 	if obj == nil || reflect.ValueOf(obj).IsNil() {
 		return types.APIObject{}
 	}
@@ -124,23 +140,25 @@ func toAPI(schema *types.APISchema, obj runtime.Object) types.APIObject {
 	}
 
 	apiObject.ID = id
+	apiObject.Warnings = warnings
 	return apiObject
 }
 
-func (s *Store) byID(apiOp *types.APIRequest, schema *types.APISchema, namespace, id string) (*unstructured.Unstructured, error) {
-	k8sClient, err := metricsStore.Wrap(s.clientGetter.TableClient(apiOp, schema, namespace))
+func (s *Store) byID(apiOp *types.APIRequest, schema *types.APISchema, namespace, id string) (*unstructured.Unstructured, []types.Warning, error) {
+	buffer := &WarningBuffer{}
+	k8sClient, err := metricsStore.Wrap(s.clientGetter.TableClient(apiOp, schema, namespace, buffer))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	opts := metav1.GetOptions{}
 	if err := decodeParams(apiOp, &opts); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	obj, err := k8sClient.Get(apiOp, id, opts)
 	rowToObject(obj)
-	return obj, err
+	return obj, buffer.Warnings, err
 }
 
 func moveFromUnderscore(obj map[string]interface{}) map[string]interface{} {
@@ -237,12 +255,13 @@ func (s *Store) ByNames(apiOp *types.APIRequest, schema *types.APISchema, names 
 		return types.APIObjectList{}, nil
 	}
 
-	adminClient, err := s.clientGetter.TableAdminClient(apiOp, schema, apiOp.Namespace)
+	buffer := &WarningBuffer{}
+	adminClient, err := s.clientGetter.TableAdminClient(apiOp, schema, apiOp.Namespace, buffer)
 	if err != nil {
 		return types.APIObjectList{}, err
 	}
 
-	objs, err := s.list(apiOp, schema, adminClient)
+	objs, err := s.list(apiOp, schema, adminClient, buffer)
 	if err != nil {
 		return types.APIObjectList{}, err
 	}
@@ -260,14 +279,15 @@ func (s *Store) ByNames(apiOp *types.APIRequest, schema *types.APISchema, names 
 
 // List returns a list of resources.
 func (s *Store) List(apiOp *types.APIRequest, schema *types.APISchema) (types.APIObjectList, error) {
-	client, err := s.clientGetter.TableClient(apiOp, schema, apiOp.Namespace)
+	buffer := &WarningBuffer{}
+	client, err := s.clientGetter.TableClient(apiOp, schema, apiOp.Namespace, buffer)
 	if err != nil {
 		return types.APIObjectList{}, err
 	}
-	return s.list(apiOp, schema, client)
+	return s.list(apiOp, schema, client, buffer)
 }
 
-func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dynamic.ResourceInterface) (types.APIObjectList, error) {
+func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dynamic.ResourceInterface, buffer *WarningBuffer) (types.APIObjectList, error) {
 	opts := metav1.ListOptions{}
 	if err := decodeParams(apiOp, &opts); err != nil {
 		return types.APIObjectList{}, nil
@@ -287,7 +307,7 @@ func (s *Store) list(apiOp *types.APIRequest, schema *types.APISchema, client dy
 	}
 
 	for i := range resultList.Items {
-		result.Objects = append(result.Objects, toAPI(schema, &resultList.Items[i]))
+		result.Objects = append(result.Objects, toAPI(schema, &resultList.Items[i], buffer.Warnings))
 	}
 
 	return result, nil
@@ -340,9 +360,9 @@ func (s *Store) listAndWatch(apiOp *types.APIRequest, client dynamic.ResourceInt
 	if s.notifier != nil {
 		eg.Go(func() error {
 			for rel := range s.notifier.OnInboundRelationshipChange(ctx, schema, apiOp.Namespace) {
-				obj, err := s.byID(apiOp, schema, rel.Namespace, rel.Name)
+				obj, warnings, err := s.byID(apiOp, schema, rel.Namespace, rel.Name)
 				if err == nil {
-					result <- s.toAPIEvent(apiOp, schema, watch.Modified, obj)
+					result <- s.toAPIEvent(apiOp, schema, watch.Modified, obj, warnings)
 				} else {
 					logrus.Debugf("notifier watch error: %v", err)
 					returnErr(errors.Wrapf(err, "notifier watch error: %v", err), result)
@@ -363,7 +383,7 @@ func (s *Store) listAndWatch(apiOp *types.APIRequest, client dynamic.ResourceInt
 				}
 				continue
 			}
-			result <- s.toAPIEvent(apiOp, schema, event.Type, event.Object)
+			result <- s.toAPIEvent(apiOp, schema, event.Type, event.Object, nil)
 		}
 		return fmt.Errorf("closed")
 	})
@@ -379,7 +399,8 @@ func (s *Store) listAndWatch(apiOp *types.APIRequest, client dynamic.ResourceInt
 // With this filter, the request can be performed successfully, and only the allowed resources will
 // be returned in watch.
 func (s *Store) WatchNames(apiOp *types.APIRequest, schema *types.APISchema, w types.WatchRequest, names sets.String) (chan types.APIEvent, error) {
-	adminClient, err := s.clientGetter.TableAdminClientForWatch(apiOp, schema, apiOp.Namespace)
+	buffer := &WarningBuffer{}
+	adminClient, err := s.clientGetter.TableAdminClientForWatch(apiOp, schema, apiOp.Namespace, buffer)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +424,8 @@ func (s *Store) WatchNames(apiOp *types.APIRequest, schema *types.APISchema, w t
 
 // Watch returns a channel of events for a list or resource.
 func (s *Store) Watch(apiOp *types.APIRequest, schema *types.APISchema, w types.WatchRequest) (chan types.APIEvent, error) {
-	client, err := s.clientGetter.TableClientForWatch(apiOp, schema, apiOp.Namespace)
+	buffer := &WarningBuffer{}
+	client, err := s.clientGetter.TableClientForWatch(apiOp, schema, apiOp.Namespace, buffer)
 	if err != nil {
 		return nil, err
 	}
@@ -420,7 +442,7 @@ func (s *Store) watch(apiOp *types.APIRequest, schema *types.APISchema, w types.
 	return result, nil
 }
 
-func (s *Store) toAPIEvent(apiOp *types.APIRequest, schema *types.APISchema, et watch.EventType, obj runtime.Object) types.APIEvent {
+func (s *Store) toAPIEvent(apiOp *types.APIRequest, schema *types.APISchema, et watch.EventType, obj runtime.Object, warnings []types.Warning) types.APIEvent {
 	name := types.ChangeAPIEvent
 	switch et {
 	case watch.Deleted:
@@ -435,7 +457,7 @@ func (s *Store) toAPIEvent(apiOp *types.APIRequest, schema *types.APISchema, et 
 
 	event := types.APIEvent{
 		Name:   name,
-		Object: toAPI(schema, obj),
+		Object: toAPI(schema, obj, warnings),
 	}
 
 	m, err := meta.Accessor(obj)
@@ -472,7 +494,8 @@ func (s *Store) Create(apiOp *types.APIRequest, schema *types.APISchema, params 
 	gvk := attributes.GVK(schema)
 	input["apiVersion"], input["kind"] = gvk.ToAPIVersionAndKind()
 
-	k8sClient, err := metricsStore.Wrap(s.clientGetter.TableClient(apiOp, schema, ns))
+	buffer := &WarningBuffer{}
+	k8sClient, err := metricsStore.Wrap(s.clientGetter.TableClient(apiOp, schema, ns, buffer))
 	if err != nil {
 		return types.APIObject{}, err
 	}
@@ -484,7 +507,7 @@ func (s *Store) Create(apiOp *types.APIRequest, schema *types.APISchema, params 
 
 	resp, err = k8sClient.Create(apiOp, &unstructured.Unstructured{Object: input}, opts)
 	rowToObject(resp)
-	apiObject := toAPI(schema, resp)
+	apiObject := toAPI(schema, resp, buffer.Warnings)
 	return apiObject, err
 }
 
@@ -496,7 +519,8 @@ func (s *Store) Update(apiOp *types.APIRequest, schema *types.APISchema, params 
 	)
 
 	ns := types.Namespace(input)
-	k8sClient, err := metricsStore.Wrap(s.clientGetter.TableClient(apiOp, schema, ns))
+	buffer := &WarningBuffer{}
+	k8sClient, err := metricsStore.Wrap(s.clientGetter.TableClient(apiOp, schema, ns, buffer))
 	if err != nil {
 		return types.APIObject{}, err
 	}
@@ -534,7 +558,7 @@ func (s *Store) Update(apiOp *types.APIRequest, schema *types.APISchema, params 
 			return types.APIObject{}, err
 		}
 
-		return toAPI(schema, resp), nil
+		return toAPI(schema, resp, buffer.Warnings), nil
 	}
 
 	resourceVersion := input.String("metadata", "resourceVersion")
@@ -553,7 +577,7 @@ func (s *Store) Update(apiOp *types.APIRequest, schema *types.APISchema, params 
 	}
 
 	rowToObject(resp)
-	return toAPI(schema, resp), nil
+	return toAPI(schema, resp, buffer.Warnings), nil
 }
 
 // Delete deletes an object from a store.
@@ -563,7 +587,8 @@ func (s *Store) Delete(apiOp *types.APIRequest, schema *types.APISchema, id stri
 		return types.APIObject{}, nil
 	}
 
-	k8sClient, err := metricsStore.Wrap(s.clientGetter.TableClient(apiOp, schema, apiOp.Namespace))
+	buffer := &WarningBuffer{}
+	k8sClient, err := metricsStore.Wrap(s.clientGetter.TableClient(apiOp, schema, apiOp.Namespace, buffer))
 	if err != nil {
 		return types.APIObject{}, err
 	}
@@ -572,12 +597,12 @@ func (s *Store) Delete(apiOp *types.APIRequest, schema *types.APISchema, id stri
 		return types.APIObject{}, err
 	}
 
-	obj, err := s.byID(apiOp, schema, apiOp.Namespace, id)
+	obj, warnings, err := s.byID(apiOp, schema, apiOp.Namespace, id)
 	if err != nil {
 		// ignore lookup error
 		return types.APIObject{}, validation.ErrorCode{
 			Status: http.StatusNoContent,
 		}
 	}
-	return toAPI(schema, obj), nil
+	return toAPI(schema, obj, warnings), nil
 }
